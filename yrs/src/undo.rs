@@ -39,10 +39,17 @@ pub struct UndoManager<M> {
 }
 
 #[cfg(feature = "sync")]
-type UndoFn<M> = Box<dyn Fn(&TransactionMut, &mut Event<M>) + Send + Sync + 'static>;
+type UndoFn<M> = Box<dyn Fn(&TransactionMut, &mut Event<M>, bool) + Send + Sync + 'static>;
 
 #[cfg(not(feature = "sync"))]
-type UndoFn<M> = Box<dyn Fn(&TransactionMut, &mut Event<M>) + 'static>;
+type UndoFn<M> = Box<dyn Fn(&TransactionMut, &mut Event<M>, bool) + 'static>;
+
+#[cfg(feature = "sync")]
+type UndoPoppedFn<M> = Box<dyn Fn(&TransactionMut, &mut Event<M>) + Send + Sync + 'static>;
+
+#[cfg(not(feature = "sync"))]
+type UndoPoppedFn<M> = Box<dyn Fn(&TransactionMut, &mut Event<M>) + 'static>;
+
 
 #[cfg(feature = "sync")]
 pub trait Meta: Default + Send + Sync {}
@@ -64,7 +71,7 @@ struct Inner<M> {
     last_change: u64,
     observer_added: Observer<UndoFn<M>>,
     observer_updated: Observer<UndoFn<M>>,
-    observer_popped: Observer<UndoFn<M>>,
+    observer_popped: Observer<UndoPoppedFn<M>>,
 }
 
 impl<M> UndoManager<M>
@@ -226,15 +233,15 @@ where
         let mut event = if undoing {
             Event::undo(meta, txn.origin.clone(), txn.changed_parent_types.clone())
         } else {
-            Event::redo(meta, txn.origin.clone(), txn.changed_parent_types.clone())
+            Event::redo(meta, txn.origin.clone(), !redoing, txn.changed_parent_types.clone())
         };
         if !extend {
             if inner.observer_added.has_subscribers() {
-                inner.observer_added.trigger(|fun| fun(txn, &mut event));
+                inner.observer_added.trigger(|fun| fun(txn, &mut event, !undoing && !redoing));
             }
         } else {
             if inner.observer_updated.has_subscribers() {
-                inner.observer_updated.trigger(|fun| fun(txn, &mut event));
+                inner.observer_updated.trigger(|fun| fun(txn, &mut event, !undoing && !redoing));
             }
         }
         last_op.meta = event.meta;
@@ -259,7 +266,7 @@ where
     #[cfg(feature = "sync")]
     pub fn observe_item_added<F>(&self, f: F) -> crate::Subscription
     where
-        F: Fn(&TransactionMut, &mut Event<M>) + Send + Sync + 'static,
+        F: Fn(&TransactionMut, &mut Event<M>, bool) + Send + Sync + 'static,
     {
         self.state.observer_added.subscribe(Box::new(f))
     }
@@ -289,7 +296,7 @@ where
     pub fn observe_item_added_with<K, F>(&self, key: K, f: F)
     where
         K: Into<Origin>,
-        F: Fn(&TransactionMut, &mut Event<M>) + Send + Sync + 'static,
+        F: Fn(&TransactionMut, &mut Event<M>, bool) + Send + Sync + 'static,
     {
         self.state
             .observer_added
@@ -329,7 +336,7 @@ where
     #[cfg(feature = "sync")]
     pub fn observe_item_updated<F>(&self, f: F) -> crate::Subscription
     where
-        F: Fn(&TransactionMut, &mut Event<M>) + Send + Sync + 'static,
+        F: Fn(&TransactionMut, &mut Event<M>, bool) + Send + Sync + 'static,
     {
         self.state.observer_updated.subscribe(Box::new(f))
     }
@@ -357,7 +364,7 @@ where
     pub fn observe_item_updated_with<K, F>(&self, key: K, f: F)
     where
         K: Into<Origin>,
-        F: Fn(&TransactionMut, &mut Event<M>) + Send + Sync + 'static,
+        F: Fn(&TransactionMut, &mut Event<M>, bool) + Send + Sync + 'static,
     {
         self.state
             .observer_updated
@@ -728,7 +735,7 @@ where
         );
         txn.commit();
         let changed = if let Some(item) = result {
-            let mut e = Event::redo(item.meta, Some(origin), txn.changed_parent_types.clone());
+            let mut e = Event::redo(item.meta, Some(origin), false, txn.changed_parent_types.clone());
             if inner.observer_popped.has_subscribers() {
                 inner.observer_popped.trigger(|fun| fun(&txn, &mut e));
             }
@@ -965,12 +972,12 @@ impl<M> Event<M> {
         }
     }
 
-    fn redo(meta: M, origin: Option<Origin>, changed_parent_types: Vec<BranchPtr>) -> Self {
+    fn redo(meta: M, origin: Option<Origin>, normal: bool, changed_parent_types: Vec<BranchPtr>) -> Self {
         Event {
             meta,
             origin,
             changed_parent_types,
-            kind: EventKind::Redo,
+            kind: EventKind::Redo(normal),
         }
     }
 
@@ -1012,7 +1019,7 @@ pub enum EventKind {
     /// Referenced event was result of [UndoManager::undo] operation.
     Undo,
     /// Referenced event was result of [UndoManager::redo] operation.
-    Redo,
+    Redo(bool),
 }
 
 #[cfg(test)]
