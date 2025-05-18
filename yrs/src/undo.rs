@@ -233,7 +233,7 @@ where
         let mut event = if undoing {
             Event::undo(meta, txn.origin.clone(), txn.changed_parent_types.clone())
         } else {
-            Event::redo(meta, txn.origin.clone(), !redoing, txn.changed_parent_types.clone())
+            Event::redo(meta, txn.origin.clone(), txn.changed_parent_types.clone())
         };
         if !extend {
             if inner.observer_added.has_subscribers() {
@@ -512,6 +512,25 @@ where
         }
     }
 
+    /// Clears the redo stack of the undo manager.
+    ///
+    /// This method removes all redo operations stored in the undo manager's redo stack.
+    /// It also properly cleans up any references to deleted items that were part of those
+    /// redo operations.
+    ///
+    /// # Deadlocks
+    ///
+    /// This method requires access to the underlying document store. Make sure no other
+    /// transaction is active while calling this method to avoid potential deadlocks.
+    pub fn clear_redo_stack(&mut self) {
+        let txn = self.doc.transact();
+        let inner = Arc::get_mut(&mut self.state).unwrap();
+        let len = inner.redo_stack.len();
+        for item in inner.redo_stack.drain(0..len) {
+            Self::clear_item(&inner.scope, &txn, item);
+        }
+    }
+
     fn clear_item<T: ReadTxn>(scope: &HashSet<BranchPtr>, txn: &T, stack_item: StackItem<M>) {
         let mut deleted = stack_item.deletions.deleted_blocks();
         while let Some(slice) = deleted.next(txn) {
@@ -735,7 +754,7 @@ where
         );
         txn.commit();
         let changed = if let Some(item) = result {
-            let mut e = Event::redo(item.meta, Some(origin), false, txn.changed_parent_types.clone());
+            let mut e = Event::redo(item.meta, Some(origin), txn.changed_parent_types.clone());
             if inner.observer_popped.has_subscribers() {
                 inner.observer_popped.trigger(|fun| fun(&txn, &mut e));
             }
@@ -972,12 +991,12 @@ impl<M> Event<M> {
         }
     }
 
-    fn redo(meta: M, origin: Option<Origin>, normal: bool, changed_parent_types: Vec<BranchPtr>) -> Self {
+    fn redo(meta: M, origin: Option<Origin>, changed_parent_types: Vec<BranchPtr>) -> Self {
         Event {
             meta,
             origin,
             changed_parent_types,
-            kind: EventKind::Redo(normal),
+            kind: EventKind::Redo,
         }
     }
 
@@ -1019,7 +1038,7 @@ pub enum EventKind {
     /// Referenced event was result of [UndoManager::undo] operation.
     Undo,
     /// Referenced event was result of [UndoManager::redo] operation.
-    Redo(bool),
+    Redo,
 }
 
 #[cfg(test)]
